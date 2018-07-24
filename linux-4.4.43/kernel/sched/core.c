@@ -286,6 +286,7 @@ int sysctl_sched_rt_runtime = 950000;
 
 /* cpus with isolated domains */
 cpumask_var_t cpu_isolated_map;
+EXPORT_SYMBOL(cpu_isolated_map);
 
 /*
  * this_rq_lock - lock this runqueue and disable interrupts.
@@ -1834,7 +1835,9 @@ void scheduler_ipi(void)
 	 * however a fair share of IPIs are still resched only so this would
 	 * somewhat pessimize the simple resched case.
 	 */
+#ifndef IPIPE_ARCH_HAVE_VIRQ_IPI
 	irq_enter();
+#endif
 	sched_ttwu_pending();
 
 	/*
@@ -1844,7 +1847,9 @@ void scheduler_ipi(void)
 		this_rq()->idle_balance = 1;
 		raise_softirq_irqoff(SCHED_SOFTIRQ);
 	}
+#ifndef IPIPE_ARCH_HAVE_VIRQ_IPI
 	irq_exit();
+#endif
 }
 
 static void ttwu_queue_remote(struct task_struct *p, int cpu)
@@ -1937,7 +1942,8 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 */
 	smp_mb__before_spinlock();
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
-	if (!(p->state & state))
+	if (!(p->state & state) ||
+	    (p->state & (TASK_NOWAKEUP|TASK_HARDENING)))
 		goto out;
 
 	trace_sched_waking(p);
@@ -2676,6 +2682,7 @@ asmlinkage __visible void schedule_tail(struct task_struct *prev)
 	 * PREEMPT_COUNT kernels).
 	 */
 
+	__ipipe_complete_domain_migration();
 	rq = finish_task_switch(prev);
 	balance_callback(rq);
 	preempt_enable();
@@ -2687,16 +2694,21 @@ asmlinkage __visible void schedule_tail(struct task_struct *prev)
 /*
  * context_switch - switch to the new MM and the new thread's register state.
  */
-static inline struct rq *
+static struct rq *
 context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next)
 {
 	struct mm_struct *mm, *oldmm;
 
-	prepare_task_switch(rq, prev, next);
-
 	mm = next->mm;
 	oldmm = prev->active_mm;
+
+if (likely(!rq)) {
+	__switch_mm(oldmm, next->active_mm, next);
+	if (!mm) enter_lazy_tlb(oldmm, next);
+} else {
+	prepare_task_switch(rq, prev, next);
+
 	/*
 	 * For paravirt, this is coupled with an exit in switch_to to
 	 * combine the page table reload and the switch backend into
@@ -2723,13 +2735,19 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	 */
 	lockdep_unpin_lock(&rq->lock);
 	spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
-
+}
 	/* Here we just switch the register state and the stack. */
 	switch_to(prev, next, prev);
 	barrier();
 
+if (likely(!rq)) return NULL;
+
+	if (unlikely(__ipipe_switch_tail()))
+		return NULL;
+
 	return finish_task_switch(prev);
 }
+EXPORT_SYMBOL(context_switch);
 
 /*
  * nr_running and nr_context_switches:
@@ -2950,6 +2968,7 @@ notrace unsigned long get_parent_ip(unsigned long addr)
 
 void preempt_count_add(int val)
 {
+	ipipe_preempt_root_only();
 #ifdef CONFIG_DEBUG_PREEMPT
 	/*
 	 * Underflow?
@@ -2978,6 +2997,7 @@ NOKPROBE_SYMBOL(preempt_count_add);
 
 void preempt_count_sub(int val)
 {
+	ipipe_preempt_root_only();
 #ifdef CONFIG_DEBUG_PREEMPT
 	/*
 	 * Underflow?
@@ -3032,6 +3052,7 @@ static noinline void __schedule_bug(struct task_struct *prev)
  */
 static inline void schedule_debug(struct task_struct *prev)
 {
+	ipipe_root_only();
 #ifdef CONFIG_SCHED_STACK_END_CHECK
 	if (task_stack_end_corrupted(prev))
 		panic("corrupted stack end detected inside scheduler\n");
@@ -3126,7 +3147,7 @@ again:
  *
  * WARNING: must be called with preemption disabled!
  */
-static void __sched notrace __schedule(bool preempt)
+static int __sched notrace __schedule(bool preempt)
 {
 	struct task_struct *prev, *next;
 	unsigned long *switch_count;
@@ -3204,13 +3225,18 @@ static void __sched notrace __schedule(bool preempt)
 
 		trace_sched_switch(preempt, prev, next);
 		rq = context_switch(rq, prev, next); /* unlocks the rq */
+  		if (rq == NULL)
+			return 1; /* task hijacked by head domain */
 		cpu = cpu_of(rq);
 	} else {
+		prev->state &= ~TASK_HARDENING;
 		lockdep_unpin_lock(&rq->lock);
 		raw_spin_unlock_irq(&rq->lock);
 	}
 
 	balance_callback(rq);
+
+	return 0;
 }
 
 static inline void sched_submit_work(struct task_struct *tsk)
@@ -3232,7 +3258,8 @@ asmlinkage __visible void __sched schedule(void)
 	sched_submit_work(tsk);
 	do {
 		preempt_disable();
-		__schedule(false);
+		if (__schedule(false))
+			return;
 		sched_preempt_enable_no_resched();
 	} while (need_resched());
 }
@@ -3273,7 +3300,8 @@ static void __sched notrace preempt_schedule_common(void)
 {
 	do {
 		preempt_disable_notrace();
-		__schedule(true);
+		if (__schedule(true))
+			return;
 		preempt_enable_no_resched_notrace();
 
 		/*
@@ -3295,7 +3323,7 @@ asmlinkage __visible void __sched notrace preempt_schedule(void)
 	 * If there is a non-zero preempt_count or interrupts are disabled,
 	 * we do not want to preempt the current task. Just return..
 	 */
-	if (likely(!preemptible()))
+	if (likely(!preemptible() || !ipipe_root_p))
 		return;
 
 	preempt_schedule_common();
@@ -3321,7 +3349,7 @@ asmlinkage __visible void __sched notrace preempt_schedule_notrace(void)
 {
 	enum ctx_state prev_ctx;
 
-	if (likely(!preemptible()))
+	if (likely(!preemptible() || !ipipe_root_p))
 		return;
 
 	do {
@@ -4017,6 +4045,7 @@ change:
 
 	prev_class = p->sched_class;
 	__setscheduler(rq, p, attr, pi);
+  	__ipipe_report_setsched(p);
 
 	if (running)
 		p->sched_class->set_curr_task(rq);
@@ -8632,3 +8661,42 @@ void dump_cpu_task(int cpu)
 	pr_info("Task dump for CPU %d:\n", cpu);
 	sched_show_task(cpu_curr(cpu));
 }
+
+#ifdef CONFIG_IPIPE
+
+int __ipipe_migrate_head(void)
+{
+	struct task_struct *p = current;
+
+	preempt_disable();
+
+	IPIPE_WARN_ONCE(__this_cpu_read(ipipe_percpu.task_hijacked) != NULL);
+
+	__this_cpu_write(ipipe_percpu.task_hijacked, p);
+	set_current_state(TASK_INTERRUPTIBLE | TASK_HARDENING);
+	sched_submit_work(p);
+	if (likely(__schedule(false)))
+		return 0;
+
+	if (signal_pending(p))
+		return -ERESTARTSYS;
+
+	BUG();
+}
+EXPORT_SYMBOL_GPL(__ipipe_migrate_head);
+
+void __ipipe_reenter_root(void)
+{
+	struct rq *rq;
+	struct task_struct *p;
+
+	p = __this_cpu_read(ipipe_percpu.rqlock_owner);
+	BUG_ON(p == NULL);
+	ipipe_clear_thread_flag(TIP_HEAD);
+	rq = finish_task_switch(p);
+	balance_callback(rq);
+	preempt_enable_no_resched_notrace();
+}
+EXPORT_SYMBOL_GPL(__ipipe_reenter_root);
+
+#endif /* CONFIG_IPIPE */
