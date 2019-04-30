@@ -159,6 +159,7 @@ extern void smp_apic_timer_interrupt(struct pt_regs *);
 extern void smp_spurious_interrupt(struct pt_regs *);
 extern void smp_x86_platform_ipi(struct pt_regs *);
 extern void smp_error_interrupt(struct pt_regs *);
+extern void smp_irq_work_interrupt(struct pt_regs *);
 #ifdef CONFIG_X86_IO_APIC
 extern asmlinkage void smp_irq_move_cleanup_interrupt(void);
 #endif
@@ -171,6 +172,7 @@ extern void smp_invalidate_interrupt(struct pt_regs *);
 #else
 extern asmlinkage void smp_invalidate_interrupt(struct pt_regs *);
 #endif
+extern asmlinkage void smp_reboot_interrupt(void);
 #endif
 
 extern void (*__initconst interrupt[NR_VECTORS-FIRST_EXTERNAL_VECTOR])(void);

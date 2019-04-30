@@ -21,6 +21,7 @@ struct task_struct;
 struct exec_domain;
 #include <asm/processor.h>
 #include <linux/atomic.h>
+#include <ipipe/thread_info.h>
 
 struct thread_info {
 	struct task_struct	*task;		/* main task structure */
@@ -41,6 +42,7 @@ struct thread_info {
 #endif
 	unsigned int		sig_on_uaccess_error:1;
 	unsigned int		uaccess_err:1;	/* uaccess failed */
+	struct ipipe_threadinfo ipipe_data;
 };
 
 #define INIT_THREAD_INFO(tsk)			\

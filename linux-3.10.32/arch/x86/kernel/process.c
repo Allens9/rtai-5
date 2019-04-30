@@ -93,6 +93,10 @@ void arch_task_cache_init(void)
         	kmem_cache_create("task_xstate", xstate_size,
 				  __alignof__(union thread_xstate),
 				  SLAB_PANIC | SLAB_NOTRACK, NULL);
+#ifdef CONFIG_IPIPE
+	memset(&current->thread.fpu, 0, sizeof(current->thread.fpu));
+	fpu_alloc(&current->thread.fpu);
+#endif
 }
 
 /*
@@ -128,12 +132,14 @@ void flush_thread(void)
 	flush_ptrace_hw_breakpoint(tsk);
 	memset(tsk->thread.tls_array, 0, sizeof(tsk->thread.tls_array));
 	drop_init_fpu(tsk);
+#ifndef CONFIG_IPIPE	/* non-lazily handled if I-pipe is enable */
 	/*
 	 * Free the FPU state for non xsave platforms. They get reallocated
 	 * lazily at the first use.
 	 */
 	if (!use_eager_fpu())
 		free_thread_xstate(tsk);
+#endif
 }
 
 static void hard_disable_TSC(void)
@@ -329,7 +335,7 @@ bool xen_set_default_idle(void)
 #endif
 void stop_this_cpu(void *dummy)
 {
-	local_irq_disable();
+	hard_local_irq_disable();
 	/*
 	 * Remove this CPU:
 	 */
@@ -368,6 +374,10 @@ static void amd_e400_idle(void)
 			if (!boot_cpu_has(X86_FEATURE_NONSTOP_TSC))
 				mark_tsc_unstable("TSC halt in AMD C1E");
 			pr_info("System has AMD C1E enabled\n");
+#ifdef CONFIG_IPIPE
+			pr_info("I-pipe: will not be able to use LAPIC as a tick device\n"
+				"I-pipe: disable C1E power state in your BIOS\n");
+#endif
 		}
 	}
 
